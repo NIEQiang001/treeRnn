@@ -139,7 +139,7 @@ class BasicRecursiveNN:
         if node.state == None:
             node.state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
         if len(node.child) == 0:
-            output, hstate = node.cell(inputs[node.label], state)
+            output, hstate = node.cell(inputs[node.label], node.state)
             outputs[node.label] = output
             return hstate
         else:
