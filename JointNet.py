@@ -36,8 +36,8 @@ class Node:  # a node in the tree
         else:
             self.cell = tf.nn.rnn_cell.GRUCell(unit_num)
 
-        self.parent = None  # reference to parent
-        self.child = []  # reference to left child
+        self.parent = []  # reference to parent
+        self.child = []  # reference to child
         self.childnum = 0  # number of child
         self.state = None
         # true if it's a leaf joint
@@ -125,8 +125,8 @@ class BasicRecursiveNN:
         self.batch_size = batch_size
 
     def forward(self, root_node, inputs):
-        outputs = []
         jointNum = tf.shape(inputs)[2]
+        outputs = [0] * jointNum
         x = tf.unstack(inputs, jointNum, 2)
         final_state = self.recursive_forward(root_node, x, outputs)
         # output, hstate = root_node.cell(inputs[root_node.label], final_state)
@@ -136,10 +136,11 @@ class BasicRecursiveNN:
     def recursive_forward(self, node, inputs, outputs):
         # get states from children
         state_size = self.hidden_size
+        if node.state == None:
+            node.state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
         if len(node.child) == 0:
-            state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
             output, hstate = node.cell(inputs[node.label], state)
-            outputs.append(output)
+            outputs[node.label] = output
             return hstate
         else:
             assert len(node.child) <= 3
@@ -148,19 +149,19 @@ class BasicRecursiveNN:
                 child_state = self.recursive_forward(node.child[idx], inputs, outputs)
                 child_states.append(child_state)
             if len(child_states) == 1:
-                output, hstate = node.cell(inputs[node.label], child_states[0])
-                outputs.append(output)
+                node_inputs = tf.concat([inputs[node.label], child_states[0]], 1)
+                output, hstate = node.cell(node_inputs, node.state)
+                outputs[node.label] = output
                 return hstate
             elif len(child_states) == 2:
-                node_state = tf.nn.rnn_cell_impl._Linear(tf.concat([child_states[0], child_states[1]], 1), state_size)
-                output, hstate = node.cell(inputs[node.label], node_state)
-                outputs.append(output)
+                node_inputs = tf.concat([inputs[node.label], child_states[0], child_states[1]], 1)
+                output, hstate = node.cell(node_inputs, node.state)
+                outputs[node.label] = output
                 return hstate
             else:
-                node_state = tf.nn.rnn_cell_impl._Linear(tf.concat([child_states[0], child_states[1],
-                                                                    child_states[3]], 1), state_size)
-                output, hstate = node.cell(inputs[node.label], node_state)
-                outputs.append(output)
+                node_inputs = tf.concat([child_states[0], child_states[1], child_states[3]], 1)
+                output, hstate = node.cell(node_inputs, node.state)
+                outputs[node.label] = output
 
                 # outputs.append(node_state)
                 return hstate
@@ -173,14 +174,21 @@ class RecurrentRecursiveNN:
         self.batch_size = batch_size
 
     def forward(self, root_node, inputs):
-        outputs = []
         jointNum = tf.shape(inputs)[2]
+        outputs = [0] * jointNum
         x = tf.unstack(inputs, jointNum, 2)
         final_state = self.recursive_forward(root_node, x, outputs)
         # output, hstate = root_node.cell(inputs[root_node.label], final_state)
         # outputs.append(output)
         # states.append(final_state)
         return outputs, final_state
+
+    def backward(self, root_node, inputs):
+        jointNum = tf.shape(inputs)[2]
+        outputs = [0] * jointNum
+        x = tf.unstack(inputs, jointNum, 2)
+        self.recursive_backward(root_node, x, outputs)
+        return outputs
 
     def recursive_forward(self, node, inputs, outputs):
         # get states from children
@@ -192,7 +200,7 @@ class RecurrentRecursiveNN:
                 state = node.state
             output, hstate = node.cell(inputs[node.label], state)
             node.state = hstate
-            outputs.append(output)
+            outputs[node.label] = output
             return hstate
         else:
             assert len(node.child) <= 3
@@ -205,34 +213,62 @@ class RecurrentRecursiveNN:
                     state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
                 else:
                     state = node.state
-                state = tf.concat([state, child_states[0]], 1)
-                node_state = tf.nn.rnn_cell_impl._Linear(state, state_size)
-                output, hstate = node.cell(inputs[node.label], node_state)
+                node_input = tf.concat([inputs[node.label], child_states[0]], 1)
+                output, hstate = node.cell(node_input, state)
                 node.state = hstate
-                outputs.append(output)
+                outputs[node.label] = output
                 return hstate
             elif len(child_states) == 2:
                 if node.state == None:
                     state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
                 else:
                     state = node.state
-                state = tf.concat([state, child_states[0], child_states[1]], 1)
-                node_state = tf.nn.rnn_cell_impl._Linear(state, state_size)
-                output, hstate = node.cell(inputs[node.label], node_state)
+                node_input = tf.concat([inputs[node.label], child_states[0], child_states[1]], 1)
+                output, hstate = node.cell(node_input, state)
                 node.state = hstate
-                outputs.append(output)
+                outputs[node.label] = output
                 return hstate
             else:
                 if node.state == None:
                     state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
                 else:
                     state = node.state
-                state = tf.concat([state, child_states[0], child_states[1], child_states[2]], 1)
-                node_state = tf.nn.rnn_cell_impl._Linear(state, state_size)
-                output, hstate = node.cell(inputs[node.label], node_state)
+                node_input = tf.concat([inputs[node.label], child_states[0], child_states[1], child_states[2]], 1)
+                output, hstate = node.cell(node_input, state)
                 node.state = hstate
-                outputs.append(output)
+                outputs[node.label] = output
                 return hstate
+
+    def recursive_backward(self, node, inputs, outputs):
+        # get states from children
+        state_size = self.hidden_size
+        if len(node.parent) == 0:
+            if node.state == None:
+                state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
+            else:
+                state = node.state
+            node_input = inputs[node.label]
+            output, hstate = node.cell(node_input, state)
+            node.state = hstate
+            outputs[node.label] = outputs
+        else:
+            if node.state == None:
+                state = node.cell.zero_state(self.batch_size, dtype=tf.float32)
+            else:
+                state = node.state
+            parent_state = node.parent.state
+            node_input = tf.concat([inputs[node.label], parent_state], 1)
+            output, hstate = node.cell(node_input, state)
+            node.state = hstate
+            outputs[node.label] = outputs
+
+        assert len(node.child) > 0
+        for idx in range(len(node.child)):
+            self.recursive_backward(node.child[idx], inputs, outputs)
+        return
+
+
+
 
 def SequenceRecursivemodel_fw(inputs, is_training, batch_size, unitnum):
     # each inputs should have a shape of [batch_size, v, joint_num, time_steps]
@@ -245,9 +281,13 @@ def SequenceRecursivemodel_fw(inputs, is_training, batch_size, unitnum):
     basicmodel = BasicRecursiveNN(unitnum, batch_size)
     outfeatures = []
     for i in range(time_steps):
-        output_tensor = basicmodel.forward(jointTree.SpineBase, x[i])
+        output_tensor = basicmodel.forward(jointTree.SpineBase, x[i]) #output_tensor contains the outputs and final state of the root joint
         outfeatures.append(output_tensor)
     # fully connect across time sequence
+
+    # weights = weight_variable([unitnum, n_classes])
+    # biases = bias_variable([n_classes])
+
     return outfeatures
 
 
@@ -264,5 +304,8 @@ def RecurrentRecursiveNN_fw(inputs, is_training, batch_size, unitnum):
     outfeatures = []
     for i in range(time_steps):
         output_tensor = RRNNmodel.forward(jointTree.SpineBase, x[i])
-    outfeatures = tf.identity(output_tensor, name='outfeatures')
+    outfeatures = tf.convert_to_tensor(output_tensor)
+    outfeatures = tf.identity(outfeatures, name='outfeatures')
+    outfeatures = tf.transpose(outfeatures, [1, 0, 2])  # [batch_size, Joint_num, v]
     return outfeatures
+
